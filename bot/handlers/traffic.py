@@ -93,24 +93,29 @@ async def central_message_traffic_controller(message: Message, bot: Bot):
             except Exception:
                 pass
 
-    # 5. Encolado de multimedia para purga cíclica y conteo de estadísticas
+    # 5. Encolado de multimedia para purga cíclica y estadísticas semanales
     if message.photo or message.video or message.document:
         current_week = datetime.now().strftime("%Y-W%V")
         chat_id = message.chat.id
         user_id = message.from_user.id
 
+        # Insertar mensaje en la cola de eliminación
         await cleanup_queue_col.insert_one({
             "chat_id": chat_id,
             "message_id": message.message_id,
             "created_at": datetime.now()
         })
 
-        await groups_col.update_one(
-            {"_id": chat_id},
-            {"$setOnInsert": {"next_cleanup": datetime.now() + timedelta(hours=12)}},
-            upsert=True
-        )
+        # Asegurar que el grupo tenga un temporizador de 12h activo
+        group_data = await groups_col.find_one({"_id": chat_id}, {"next_cleanup": 1})
+        if not group_data or not group_data.get("next_cleanup"):
+            await groups_col.update_one(
+                {"_id": chat_id},
+                {"$set": {"next_cleanup": datetime.now() + timedelta(hours=12)}},
+                upsert=True
+            )
 
+        # Sumar aporte a las estadísticas
         await stats_col.update_one(
             {"chat_id": chat_id, "user_id": user_id, "week": current_week},
             {
