@@ -390,35 +390,71 @@ async def clear_badwords(callback: CallbackQuery):
     await callback.answer("🧹 Lista negra vaciada.", show_alert=False)
     await callback.message.edit_text("✅ <b>Filtro reiniciado:</b> Se eliminaron todas las palabras prohibidas.", reply_markup=get_back_kb(group_id))
 
+# --- MÓDULO DE PURGA INMEDIATA Y CUENTA REGRESIVA ---
 @router.callback_query(F.data.startswith("cleanmenu_"))
-async def cleanup_menu(callback: CallbackQuery):
+async def cleanup_menu(callback: CallbackQuery, bot: Bot):
     group_id = int(callback.data.split("_")[1])
+    now = datetime.now()
+    
+    # 1. Contar archivos pendientes
     pending_count = await cleanup_queue_col.count_documents({"chat_id": group_id})
+
+    # 2. Obtener o reparar la fecha de la próxima limpieza
     group_doc = await groups_col.find_one({"_id": group_id})
-    next_time = group_doc.get("next_cleanup", datetime.now()) if group_doc else datetime.now()
-    remaining = max(0, int((next_time - datetime.now()).total_seconds()))
-    hours, mins = divmod(remaining // 60, 60)
+    next_time = group_doc.get("next_cleanup") if group_doc else None
+
+    # Si no existe la fecha o ya expiró, programar a 12 horas desde ahora
+    if not next_time or next_time <= now:
+        next_time = now + timedelta(hours=12)
+        await groups_col.update_one(
+            {"_id": group_id},
+            {"$set": {"next_cleanup": next_time}},
+            upsert=True
+        )
+
+    # 3. Cálculo exacto del tiempo restante
+    remaining_seconds = max(0, int((next_time - now).total_seconds()))
+    hours = remaining_seconds // 3600
+    minutes = (remaining_seconds % 3600) // 60
 
     text = (
-        f"🧹 <b>MÓDULO DE PURGA Y LIMPIEZA</b>\n"
+        f"🧹 <b>MÓDULO DE PURGA Y MANTENIMIENTO</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 <b>Multimedia en cola:</b> <code>{pending_count}</code> archivos\n"
-        f"⏱️ <b>Próxima ejecución:</b> <code>{hours}h {mins}m</code>\n\n"
-        f"<i>La purga forzada destruirá de inmediato todos los archivos en espera.</i>"
+        f"📦 <b>Archivos en cola:</b> <code>{pending_count}</code> elementos\n"
+        f"⏱️ <b>Próxima purga en:</b> <code>{hours}h {minutes}m</code>\n"
+        f"🔄 <i>Ciclo programado: Cada 12 Horas</i>\n\n"
+        f"<i>Nota: La purga destruirá todo el contenido multimedia acumulado en el grupo.</i>"
     )
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Actualizar Reloj", callback_data=f"cleanmenu_{group_id}")],
         [InlineKeyboardButton(text="⚡ Forzar Purga Inmediata", callback_data=f"forceclean_{group_id}")],
-        [InlineKeyboardButton(text="◀️ Volver", callback_data=f"back_{group_id}")]
+        [InlineKeyboardButton(text="◀️ Volver al Panel", callback_data=f"back_{group_id}")]
     ])
-    await callback.message.edit_text(text, reply_markup=kb)
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await callback.answer(f"⏱️ Tiempo restante: {hours}h {minutes}m")
 
 @router.callback_query(F.data.startswith("forceclean_"))
 async def force_clean_action(callback: CallbackQuery, bot: Bot):
     group_id = int(callback.data.split("_")[1])
-    await callback.answer("Iniciando purga masiva...", show_alert=False)
+    await callback.answer("⚡ Ejecutando purga en el grupo...", show_alert=False)
+    
     purged = await execute_cleanup(group_id, bot)
-    await callback.message.edit_text(f"✅ <b>Operación Finalizada:</b> Se purgaron <code>{purged}</code> elementos.\nReloj de 12 horas reiniciado.", reply_markup=get_back_kb(group_id))
-
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Volver a Limpieza", callback_data=f"cleanmenu_{group_id}")]
+    ])
+    await callback.message.edit_text(
+        f"✅ <b>PURGA COMPLETADA CON ÉXITO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🗑️ <b>Archivos eliminados del chat:</b> <code>{purged}</code>\n"
+        f"⏱️ <b>Nuevo ciclo:</b> Reloj reiniciado a 12 horas.",
+        reply_markup=kb
+    )
+    
 @router.callback_query(F.data.startswith("help_"))
 async def guide_menu(callback: CallbackQuery):
     group_id = int(callback.data.split("_")[1])
