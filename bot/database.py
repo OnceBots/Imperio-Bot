@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.asynchronous import AsyncMongoClient
+from pymongo import AsyncMongoClient
 
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
