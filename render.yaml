@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: imperio-otomano-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: DB_NAME
+        value: imperio_bot
+      - key: OWNER_IDS
+        sync: false
+      - key: PORT
+        value: "10000"
+      - key: AUTO_DELETE_SERVICE_MESSAGES
+        value: "true"
+      - key: AUTO_DELETE_JOIN_MESSAGES
+        value: "true"
+      - key: AUTO_DELETE_LEAVE_MESSAGES
+        value: "true"
+      - key: AUTO_DELETE_PIN_MESSAGES
+        value: "true"
+      - key: AUTO_DELETE_GROUP_CHANGE_MESSAGES
+        value: "true"
+      - key: AUTO_DELETE_OTHER_SERVICE_MESSAGES
+        value: "true"
+      - key: AUTO_CLEANUP_ENABLED
+        value: "true"
+      - key: AUTO_CLEANUP_HOURS
+        value: "12"
+      - key: FILTER_LINKS
+        value: "true"
+      - key: ANTI_BOT
+        value: "true"
