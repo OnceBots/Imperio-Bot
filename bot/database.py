@@ -36,13 +36,59 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 async def init_db_indexes() -> None:
-    await groups_col.create_index("_id")
-    await cleanup_queue_col.create_index([("chat_id", ASCENDING), ("message_id", ASCENDING)], unique=True)
-    await cleanup_queue_col.create_index("created_at", expireAfterSeconds=7 * 24 * 3600)
-    await stats_col.create_index([("chat_id", ASCENDING), ("week", ASCENDING), ("count", DESCENDING)])
-    await warns_col.create_index([("chat_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
-    await audit_col.create_index([("chat_id", ASCENDING), ("created_at", DESCENDING)])
-    await audit_col.create_index("created_at", expireAfterSeconds=180 * 24 * 3600)
+    """
+    Inicializa todos los índices necesarios.
+    Maneja automáticamente migraciones de índices conflictivos (código 86) 
+    y previene caídas al arrancar.
+    """
+    # 1. cleanup_queue_col: migración segura a unique=True
+    try:
+        await cleanup_queue_col.create_index(
+            [("chat_id", ASCENDING), ("message_id", ASCENDING)], 
+            unique=True
+        )
+    except OperationFailure as e:
+        if e.code == 86:  # IndexKeySpecsConflict: ya existía sin unique
+            logger.info("Migrando índice chat_id_1_message_id_1 a unique=True...")
+            try:
+                await cleanup_queue_col.drop_index("chat_id_1_message_id_1")
+                await cleanup_queue_col.create_index(
+                    [("chat_id", ASCENDING), ("message_id", ASCENDING)], 
+                    unique=True
+                )
+            except Exception as drop_err:
+                logger.warning(f"No se pudo forzar unique en cleanup_queue: {drop_err}")
+                await cleanup_queue_col.create_index([("chat_id", ASCENDING), ("message_id", ASCENDING)])
+        else:
+            logger.warning(f"Aviso en índice compuesto cleanup_queue: {e}")
+
+    # 2. cleanup_queue_col: TTL (autodestrucción en 7 días)
+    try:
+        await cleanup_queue_col.create_index("created_at", expireAfterSeconds=7 * 24 * 3600)
+    except Exception as e:
+        logger.warning(f"Aviso en TTL cleanup_queue: {e}")
+
+    # 3. stats_col: ranking y aportes semanales
+    try:
+        await stats_col.create_index([("chat_id", ASCENDING), ("week", ASCENDING), ("count", DESCENDING)])
+    except Exception as e:
+        logger.warning(f"Aviso en índice stats: {e}")
+
+    # 4. warns_col: límite de advertencias por usuario
+    try:
+        await warns_col.create_index([("chat_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
+    except OperationFailure as e:
+        if e.code == 86:
+            await warns_col.create_index([("chat_id", ASCENDING), ("user_id", ASCENDING)])
+    except Exception as e:
+        logger.warning(f"Aviso en índice warns: {e}")
+
+    # 5. audit_col: registros y TTL (autodestrucción en 180 días)
+    try:
+        await audit_col.create_index([("chat_id", ASCENDING), ("created_at", DESCENDING)])
+        await audit_col.create_index("created_at", expireAfterSeconds=180 * 24 * 3600)
+    except Exception as e:
+        logger.warning(f"Aviso en índices audit: {e}")
 
 async def ping_db() -> None:
     await client.admin.command("ping")
