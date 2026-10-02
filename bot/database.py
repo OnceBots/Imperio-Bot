@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo import AsyncMongoClient
+from pymongo.errors import OperationFailure
 
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 
 from .config import settings
+
+logger = logging.getLogger("ImperioDB")
 
 client = AsyncMongoClient(
     settings.mongo_uri,
@@ -34,6 +39,7 @@ CACHE_TTL = timedelta(minutes=2)
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
 
 async def init_db_indexes() -> None:
     """
@@ -90,11 +96,14 @@ async def init_db_indexes() -> None:
     except Exception as e:
         logger.warning(f"Aviso en índices audit: {e}")
 
+
 async def ping_db() -> None:
     await client.admin.command("ping")
 
+
 async def close_db() -> None:
     await client.close()
+
 
 async def is_real_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
     try:
@@ -102,6 +111,7 @@ async def is_real_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
         return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}
     except Exception:
         return False
+
 
 async def is_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
     if user_id in settings.owner_ids:
@@ -114,13 +124,13 @@ async def is_admin(chat_id: int, user_id: int, bot: Bot) -> bool:
 
     group = await groups_col.find_one({"_id": chat_id}, {"authorized_users": 1})
     if group and user_id in group.get("authorized_users", []):
-        # Staff se considera operador autorizado para comandos de moderación del bot.
         _ADMIN_CACHE[key] = (True, now + CACHE_TTL)
         return True
 
     result = await is_real_admin(chat_id, user_id, bot)
     _ADMIN_CACHE[key] = (result, now + CACHE_TTL)
     return result
+
 
 async def is_group_owner(chat_id: int, user_id: int, bot: Bot) -> bool:
     if user_id in settings.owner_ids:
@@ -130,6 +140,7 @@ async def is_group_owner(chat_id: int, user_id: int, bot: Bot) -> bool:
         return member.status == ChatMemberStatus.CREATOR
     except Exception:
         return False
+
 
 async def get_blacklist(chat_id: int) -> list[str]:
     now = utcnow()
@@ -141,12 +152,19 @@ async def get_blacklist(chat_id: int) -> list[str]:
     _BLACKLIST_CACHE[chat_id] = (words, now + CACHE_TTL)
     return words
 
+
+# Alias de retrocompatibilidad para handlers existentes
+get_cached_blacklist = get_blacklist
+
+
 def invalidate_blacklist_cache(chat_id: int) -> None:
     _BLACKLIST_CACHE.pop(chat_id, None)
+
 
 def invalidate_admin_cache(chat_id: int, user_id: int) -> None:
     _ADMIN_CACHE.pop((chat_id, user_id), None)
     _PROMOTED_STAFF_CACHE.discard((chat_id, user_id))
+
 
 async def get_group(chat_id: int) -> dict[str, Any]:
     group = await groups_col.find_one({"_id": chat_id})
@@ -154,6 +172,7 @@ async def get_group(chat_id: int) -> dict[str, Any]:
         group = {"_id": chat_id, "authorized_users": [], "blacklist": [], "service_cleanup": True}
         await groups_col.insert_one(group)
     return group
+
 
 async def audit(chat_id: int, actor_id: int, action: str, target_id: int | None = None, details: str = "") -> None:
     await audit_col.insert_one({
@@ -164,6 +183,7 @@ async def audit(chat_id: int, actor_id: int, action: str, target_id: int | None 
         "details": details[:500],
         "created_at": utcnow(),
     })
+
 
 async def add_staff(chat_id: int, user_id: int, name: str, title: str = "Staff") -> None:
     await groups_col.update_one(
@@ -177,6 +197,7 @@ async def add_staff(chat_id: int, user_id: int, name: str, title: str = "Staff")
     invalidate_admin_cache(chat_id, user_id)
     _PROMOTED_STAFF_CACHE.add((chat_id, user_id))
 
+
 async def remove_staff_record(chat_id: int, user_id: int) -> None:
     await groups_col.update_one(
         {"_id": chat_id},
@@ -184,8 +205,12 @@ async def remove_staff_record(chat_id: int, user_id: int) -> None:
     )
     invalidate_admin_cache(chat_id, user_id)
 
+
 async def promote_staff(bot: Bot, chat_id: int, user_id: int, custom_title: str = "Staff") -> bool:
-    """Promoción segura: solo moderación/mensajes/fijados/videollamadas; sin invitar ni promover."""
+    """
+    Promueve al staff con permisos de moderación esenciales.
+    Bloquea invitaciones por enlace y la posibilidad de promover a otros miembros.
+    """
     try:
         await bot.promote_chat_member(
             chat_id=chat_id,
@@ -200,18 +225,21 @@ async def promote_staff(bot: Bot, chat_id: int, user_id: int, custom_title: str 
             can_change_info=False,
             can_pin_messages=True,
             can_manage_topics=False,
-            can_manage_tags=False,
         )
-        try:
-            clean_title = "".join(ch for ch in custom_title.strip() if ord(ch) not in range(0x1F000, 0x1FAFF))[:16]
-            await bot.set_chat_administrator_custom_title(chat_id=chat_id, user_id=user_id, custom_title=clean_title)
-        except TelegramBadRequest:
-            pass
+        if custom_title:
+            try:
+                clean_title = "".join(ch for ch in custom_title.strip() if ord(ch) not in range(0x1F000, 0x1FAFF))[:16]
+                await bot.set_chat_administrator_custom_title(chat_id=chat_id, user_id=user_id, custom_title=clean_title)
+            except TelegramBadRequest:
+                pass
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error al promover staff {user_id} en {chat_id}: {e}")
         return False
 
+
 async def demote_staff(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Revoca todos los permisos administrativos del usuario."""
     try:
         await bot.promote_chat_member(
             chat_id=chat_id,
@@ -226,13 +254,16 @@ async def demote_staff(bot: Bot, chat_id: int, user_id: int) -> bool:
             can_change_info=False,
             can_pin_messages=False,
             can_manage_topics=False,
-            can_manage_tags=False,
         )
+        invalidate_admin_cache(chat_id, user_id)
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error al degradar staff {user_id} en {chat_id}: {e}")
         return False
 
+
 async def update_staff_custom_title(bot: Bot, chat_id: int, user_id: int, title: str) -> bool:
+    """Actualiza la etiqueta personalizada del staff en Telegram y la base de datos."""
     clean = title.strip()[:16]
     if not clean:
         return False
@@ -240,12 +271,17 @@ async def update_staff_custom_title(bot: Bot, chat_id: int, user_id: int, title:
         await bot.set_chat_administrator_custom_title(chat_id=chat_id, user_id=user_id, custom_title=clean)
         await groups_col.update_one({"_id": chat_id}, {"$set": {f"staff_details.{user_id}.title": clean}}, upsert=True)
         return True
-    except Exception:
+    except TelegramBadRequest:
         return False
+    except Exception as e:
+        logger.error(f"Error al cambiar etiqueta de {user_id} en {chat_id}: {e}")
+        return False
+
 
 async def get_warning_count(chat_id: int, user_id: int) -> int:
     doc = await warns_col.find_one({"chat_id": chat_id, "user_id": user_id})
     return int(doc.get("count", 0)) if doc else 0
+
 
 async def add_warning(chat_id: int, user_id: int) -> int:
     doc = await warns_col.find_one_and_update(
